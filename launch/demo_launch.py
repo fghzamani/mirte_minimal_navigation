@@ -103,6 +103,18 @@ BAG_TOPICS = [
 ]
 
 
+def _rel_demo_params():
+    """Workspace-relative path to demo_params.yaml, found by glob.
+
+    Hardcoding the package directory name broke everything when the directory
+    was renamed; glob over src/*/params/ survives it.
+    """
+    import glob as _g
+    hits = sorted(_g.glob(os.path.join(_WS, 'src', '*', 'params', 'demo_params.yaml')))
+    return os.path.relpath(hits[0], _WS) if hits else \
+        'src/mirte_minimal_navigation/params/demo_params.yaml'
+
+
 def _prepare_run_dir():
     """Create this run's directory and snapshot the configs into it.
 
@@ -121,7 +133,7 @@ def _prepare_run_dir():
     notes = []
     # A bag is uninterpretable later without the parameters that produced it --
     # footprint, inflation and the envelope constants all change between runs.
-    for rel in ('src/mirte_navigation/params/demo_params.yaml',
+    for rel in (_rel_demo_params(),
                 'src/online_causal_tuner/config/default_tuner_config.yaml',
                 'src/online_causal_tuner/models/envelope_constants.json'):
         src = os.path.join(_WS, rel)
@@ -130,7 +142,7 @@ def _prepare_run_dir():
             notes.append(os.path.basename(src))
 
     # The map too: resolve the yaml_filename the params actually point at.
-    params = os.path.join(_WS, 'src/mirte_navigation/params/demo_params.yaml')
+    params = os.path.join(_WS, _rel_demo_params())
     try:
         with open(params) as fh:
             for line in fh:
