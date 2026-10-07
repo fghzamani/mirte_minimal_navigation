@@ -99,6 +99,28 @@ def generate_launch_description():
             arguments=['--ros-args', '--log-level', 'bt_navigator:=debug'],
         ),
 
+        # Recovery behaviours. Without this node the behaviour tree's Spin,
+        # BackUp, DriveOnHeading and Wait calls have NO action server, so every
+        # recovery fails instantly and the goal is aborted the moment the
+        # footprint touches a lethal cell -- even when the robot has not
+        # actually collided and could back off and retry. The "N recoveries"
+        # reported by the status monitor were BT retries against nothing.
+        Node(
+            package='nav2_behaviors',
+            executable='behavior_server',
+            name='behavior_server',
+            output='screen',
+            parameters=[params_file],
+        ),
+
+        # Navigation status/feedback as RViz markers on /navigation_status
+        Node(
+            package='mirte_navigation',
+            executable='nav_status_monitor',
+            name='nav_status_monitor',
+            output='screen',
+        ),
+
         # Lifecycle manager
         Node(
             package='nav2_lifecycle_manager',
@@ -107,11 +129,22 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'autostart': True,
+                # Default is 4.0s. A transient DDS hiccup that delays one bond
+                # heartbeat makes the manager declare a perfectly healthy node
+                # DOWN and tear down the entire stack mid-navigation:
+                #   CRITICAL FAILURE: SERVER map_server IS DOWN after not
+                #   receiving a heartbeat for 4000 ms. Shutting down related nodes.
+                # The robot then stops for good, and the nav logs show only the
+                # downstream damage (stale map->odom, timed-out service calls),
+                # never the cause. Be generous: a genuinely crashed node is
+                # still caught, just 20s later.
+                'bond_timeout': 20.0,
                 'node_names': [
                     'map_server',
                     'amcl',
                     'planner_server',
                     'controller_server',
+                    'behavior_server',
                     'bt_navigator'
                 ]
             }]

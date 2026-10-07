@@ -1,0 +1,606 @@
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_footprint"
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    scan_topic: "scan"
+    min_particles: 500
+    max_particles: 2000
+    laser_model_type: "likelihood_field"
+    # Ignore laser returns closer than 0.30 m in AMCL's scan matching. The lidar
+    # sees the robot's own structure (arm/body) at ~0.24 m; those self-returns do
+    # not correspond to any map wall, so they corrupt the likelihood-field match
+    # and were a major cause of AMCL diverging/losing localization. 0.30 m matches
+    # the costmap obstacle/raytrace_min_range and the risk node self-filter.
+    laser_min_range: 0.24
+    # OMNI: Mirte is holonomic and now strafes (MPPI motion_model: Omni). AMCL
+    # defaults to DifferentialMotionModel, which CANNOT represent lateral motion,
+    # so every sideways move made the motion prediction wrong and the particle
+    # cloud diverge. This is the single most important AMCL fix for Mirte.
+    robot_model_type: "nav2_amcl::OmniMotionModel"
+    # The rplidar produces 720 beams; the original 30 was a very sparse subsample
+    # and limited pose precision. 120 was too much for this CPU-only container --
+    # AMCL could not keep up and started DROPPING scans ("Message Filter
+    # dropping message ... queue is full"), which hurts localization far more
+    # than the extra beams help. 60 (the nav2 default) is the compromise: still
+    # 2x the original sampling, but AMCL keeps up.
+    max_beams: 60
+    # Update more often -> less dead-reckoning between corrections (was 0.1/0.1).
+    update_min_d: 0.05
+    update_min_a: 0.05
+    # Likelihood-field weights. Defaults are z_hit 0.5 / z_rand 0.5, which gives
+    # half the weight to random noise and blurs the posterior. Favour the real
+    # measurement, but keep some z_rand because this map is not precise.
+    z_hit: 0.75
+    z_rand: 0.25
+    sigma_hit: 0.15
+    laser_likelihood_max_dist: 2.0
+    # Only match beams against nearby, well-mapped geometry. The lidar reaches
+    # 16 m but the map is ~13 m across and imprecise at range, so far beams
+    # inject error rather than information.
+    laser_max_range: 8.0
+    # Odometry noise for the omni model (alpha5 is the lateral/strafe term and is
+    # only used by OmniMotionModel). Mecanum wheels slip, so these are not tiny.
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    resample_interval: 1
+    transform_tolerance: 1.0
+    # Deterministic demo start: the robot is placed at the map origin with the
+    # arm in the carry pose, so AMCL localizes itself on launch and you do not
+    # have to set a 2D Pose Estimate by hand every run. If you start the robot
+    # somewhere else, either change initial_pose here or set the pose in RViz
+    # (an /initialpose message always overrides this).
+    set_initial_pose: true
+    initial_pose: {x: 0.0, y: 0.0, z: 0.0, yaw: 0.0}
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: "/home/forough/phd_projects/mirte_demo/src/mirte_navigation/maps/lab_map.yaml"
+
+planner_server:
+  ros__parameters:
+    # 1 Hz, NOT 20. SmacPlannerLattice with max_iterations 1e6 cannot run at
+    # 20 Hz on this CPU-only container -- it achieved 0.87 Hz and starved the
+    # whole stack, which is why MPPI then reported "Optimizer fail to compute
+    # path". Replanning once a second is ample; the local controller handles
+    # everything in between.
+    expected_planner_frequency: 1.0
+    use_sim_time: false
+    planner_plugins: ["GridBased"]
+    GridBased:
+      # SmacPlanner2D, not SmacPlannerLattice.
+      #
+      # The lattice planner plans with precomputed motion primitives built for a
+      # minimum TURNING RADIUS -- nav2 only ships 0.5 m and 1 m variants, and
+      # 0.5 m was in use. That encodes a non-holonomic constraint Mirte does not
+      # have: it is a mecanum base that strafes and spins in place
+      # (controller motion_model is already "Omni"). In ~0.8 m lab corridors no
+      # sequence of 0.5 m arcs reaches the goal, so A* exhausted and reported
+      #   GridBased: failed to create plan, no valid path found.
+      # on goals that were demonstrably reachable: flood-filling the actual
+      # published global costmap from the robot to goal (1.74, 2.60) connects
+      # through 33.9 m2 of cells below the inscribed-inflation threshold, and the
+      # goal cell itself costs 82 of 99. A path existed; the primitives could not
+      # express it.
+      #
+      # SmacPlanner2D is grid A* with no kinematic constraint, which is the
+      # correct model for a holonomic base. MPPI (Omni, consider_footprint: true)
+      # does the kinematic and collision work at execution time.
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.25
+      allow_unknown: false
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 5.0
+      # Push the path away from obstacles rather than hugging them; MPPI still
+      # needs room to deviate laterally inside a corridor.
+      cost_penalty: 2.0
+      # The 2D planner emits positions only. Let the final pose take the goal's
+      # orientation instead of inventing one from the last path segment.
+      use_final_approach_orientation: false
+      downsample_costmap: false
+      smooth_path: true
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+        refinement_num: 2
+
+      # Previous lattice configuration, kept for reference. Restore only if the
+      # robot is ever driven as a differential base, and then use the matching
+      # `diff` primitives rather than `omni`.
+      #   plugin: "nav2_smac_planner/SmacPlannerLattice"
+      #   lattice_filepath: ".../5cm_resolution/0.5m_turning_radius/omni/output.json"
+      #   analytic_expansion_ratio: 3.5
+      #   reverse_penalty: 2.0
+      #   change_penalty: 0.05
+      #   non_straight_penalty: 1.05
+      #   rotation_penalty: 2.0
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    min_vel_x: 0.3
+    min_speed_xy: 0.3
+    min_theta_velocity: 1.0
+    controller_frequency: 20.0
+    controller_plugins: ["FollowPath"]
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      latch_xy_goal_tolerance: True
+      time_steps: 56
+      model_dt: 0.05
+      batch_size: 2000
+      # Scaled to vx_max 0.30 / vy_max 0.20 at nav2's own ~0.4 std-to-limit
+      # ratio. vx_std 0.35 exceeded the whole forward velocity range, so MPPI's
+      # samples clipped, exploration collapsed, and it stood still at ~0.02 m/s.
+      vx_std: 0.12
+      vy_std: 0.08
+      wz_std: 0.2
+      # Measured from logs/run_20261001T164711/bag: MPPI commanded up to
+      # |v| = 0.640 m/s (vx 0.427 + vy 0.477) and the robot achieved only
+      # 0.350 m/s -- about 55% of command, across the whole run. Limits above
+      # what the base can actually do are not harmless: MPPI rolls out
+      # trajectories assuming the command is met, the robot falls 45% short,
+      # and the realised path diverges from every plan -- which is how it ends
+      # up off-path and against a wall.
+      #
+      # vy_max USED TO EXCEED vx_max (0.5 > 0.45), so the optimiser could put
+      # more speed sideways than forward and crab diagonally at 0.64 m/s while
+      # the envelope's speed ceiling -- which only ever compares the forward
+      # component -- believed the robot was capped at 0.45. Keep vy <= vx.
+      # Sized so the COMBINED command stays inside what the base achieves:
+      # hypot(0.30, 0.20) = 0.36 m/s against a measured peak of 0.35 m/s.
+      # With vx_max 0.35 / vy_max 0.25 the full-speed diagonal was 0.43 m/s,
+      # still 23% beyond capability.
+      vx_max: 0.30
+      vx_min: -0.25
+      vy_max: 0.20
+      wz_max: 1.9
+      # Measured acceleration was 0.050 -> 0.275 m/s in 0.19 s = 1.18 m/s^2.
+      # 3.0 let MPPI plan accelerations the base cannot produce.
+      ax_max: 1.2
+      ax_min: -0.55
+      ay_min: -1.2
+      ay_max: 1.2
+      az_max: 3.5
+      iteration_count: 1
+      temperature: 0.3
+      gamma: 0.015
+      # OMNI: Mirte can command vy (strafe), so MPPI must sample the full
+      # holonomic action space. With "DiffDrive" here, vy_std/vy_max below are
+      # dead and the robot can never move laterally.
+      motion_model: "Omni"
+      visualize: false
+      critic_index_to_visualize: 0
+      reset_period: 1.0 # (only in Humble)
+      regenerate_noises: false
+      sgf_order: 2
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      # NOTE: TrajectoryValidator is not part of the Humble MPPI controller as
+      # far as I can tell -- verify with
+      #   ros2 param get /controller_server FollowPath.TrajectoryValidator.plugin
+      # If it errors, this block is dead config and collision_lookahead_time
+      # is not doing anything. Left in place rather than deleted so you can
+      # check before removing.
+      TrajectoryValidator:
+        plugin: "mppi::DefaultOptimalTrajectoryValidator"
+        collision_lookahead_time: 2.0
+        consider_footprint: true
+      # OMNI: PreferForwardCritic removed. It penalizes any motion that is not
+      # "forward", which suppresses exactly the lateral/omnidirectional motion
+      # that is Mirte's advantage. It is a diff-drive critic; for a holonomic
+      # base it fights the Omni motion model.
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 1.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        # CHANGED 5.0 -> 20.0. Inside 1.0 m the old weights gave yaw error a
+        # 6:1 advantage over distance to goal. A differential-drive robot
+        # cannot close distance without perturbing heading, so holding still
+        # was the minimum-cost action. That is the parked endgame in the
+        # decision logs: d_goal frozen at 0.70-0.95 m for 15-30 s.
+        cost_weight: 20.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic: #TODO: Add this critics as one of the config space variable
+        enabled: true
+        cost_power: 1
+        # CHANGED 30.0 -> 10.0. The old comment justified 30 as needing to
+        # exceed the tuner's max CostCritic weight of 20, but CostCritic
+        # already backs off inside near_goal_distance: 1.0, so the two never
+        # compete where it matters. Position leads until the robot is inside
+        # the xy tolerance; yaw takes over after.
+        cost_weight: 10.0
+        threshold_to_consider: 1.0
+      # OMNI: disabled and removed from the critics list above (diff-drive only).
+      # PreferForwardCritic:
+      #   enabled: true
+      #   cost_power: 1
+      #   cost_weight: 30.0
+      #   threshold_to_consider: 0.5
+      # NOTE: ObstaclesCritic is configured below but is NOT in the critics
+      # list above, so none of this is loaded. CostCritic supersedes it.
+      # Left commented to avoid the impression that inflation_radius: 0.35
+      # here is in effect -- it is not.
+      # ObstaclesCritic:
+      #   enabled: true
+      #   cost_power: 1
+      #   repulsion_weight: 1.5
+      #   critical_weight: 20.0
+      #   consider_footprint: true
+      #   collision_cost: 10000.0
+      #   collision_margin_distance: 0.1
+      #   near_goal_distance: 0.5
+      #   inflation_radius: 0.35 # (only in Humble)
+      #   cost_scaling_factor: 3.0 # (only in Humble)
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        # Raised 3.81 -> 8.0 so MPPI avoids obstacles more strongly. With the
+        # thin 0.225 inflation the robot was clipping obstacles; combined with
+        # inflation_radius 0.30 this keeps a real standoff from walls.
+        cost_weight: 8.0
+        critical_cost: 253.0
+        # HARD CONSTRAINT: consider_footprint: true requires the costmap to
+        # define a `footprint:` POLYGON. With `robot_radius` (circular) the
+        # controller fails to configure:
+        #   "Considering footprint in collision checking but no robot footprint
+        #    provided in the costmap."
+        # So: robot_radius (circular, arm stowed) -> set this FALSE and rely on
+        # the inflation layer. Carry POLYGON active -> set this TRUE, otherwise
+        # the extended arm is invisible to collision checking.
+        # Currently: carry polygon is active in both costmaps -> true.
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+        trajectory_point_step: 2
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.25
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 15.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        # Keep the body aligned with the path. Omni lets MPPI strafe through a
+        # gap at any heading, and with max_angle_to_furthest 1.0 rad nothing
+        # objected until the robot was 57 deg off. Run 20261005T154800 crossed a
+        # 0.473 m gap between planters at ~70 deg to the path, where the tucked
+        # rectangle is 0.371 m across instead of 0.309, and clipped the planter.
+        # Aligned, the same plan keeps 0.034 m clearance instead of 0.011.
+        cost_weight: 6.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 0.35
+        # Humble (1.1.20) reads forward_preference; `mode` is Iron+ and was
+        # silently ignored here.
+        forward_preference: true
+      # VelocityDeadbandCritic:
+      #   enabled: true
+      #   cost_power: 1
+      #   cost_weight: 35.0
+      #   deadband_velocities: [0.05, 0.05, 0.05]
+      # TwirlingCritic:
+      #   enabled: true
+      #   twirling_cost_power: 1
+      #   twirling_cost_weight: 10.0
+
+    progress_checker_plugins: ["progress_checker"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.1
+      # 20 s, not 10. When the robot stalls in a tight spot the tuner needs time
+      # to react: ~1 s to persist the decision, ~4 s for the arm trajectory, plus
+      # the costmap footprint update. With 10 s the progress checker aborted
+      # ("Failed to make progress") before the tuner could tuck the arm and free
+      # the robot.
+      movement_time_allowance: 20.0
+    goal_checker_plugins: ["goal_checker"]
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.15
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      # MPPI runs at controller_frequency: 20.0 Hz but can only react to what
+      # the costmap holds. At 2.0 Hz the obstacle data was up to 500 ms stale,
+      # so at 95% speed (0.43 m/s) the robot covered 0.215 m blind between
+      # updates -- plus its own ~0.14 m half-length, an obstacle could be 0.35 m
+      # nearer than the costmap believed. That is how it drove straight into
+      # obstacles with a correct, conservative footprint and a healthy
+      # obstacle_layer. 10 Hz cuts the blind distance to 0.043 m. Affordable:
+      # the container has 20 cores at ~0.6 load.
+      update_frequency: 10.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      use_sim_time: False
+      rolling_window: true
+      width: 3
+      height: 3
+      # 0.025, not 0.05: a lethal cell claims its whole area, so at 0.05 an
+      # obstacle 2-4 cm from the footprint already reads as touching it. Replaying
+      # run 20261005T154800, the robot's own pose was "in collision" in 25 of 86
+      # samples at 0.05 and 11 at 0.025, with no real contact in any of them.
+      # 3x3 m at 0.025 is 14400 cells -- cheap.
+      resolution: 0.025
+      # CARRY footprint (arm side-extended), the startup state of every demo
+      # run. Ground projection of the CAD meshes posed at the carry joints,
+      # with no margin of its own (nav2 adds footprint_padding 0.01): inscribed
+      # 0.140 m, circumscribed 0.329 m. Must stay identical to
+      # ARM_CONFIGS["carry"] in online_tuner_node.py. The tuner swaps this for
+      # the tucked rectangle when the arm is VERIFIED tucked (see _envelope_label).
+      footprint: "[[-0.140, -0.152], [0.147, -0.152], [0.214, 0.150], [0.222, 0.200], [0.222, 0.243], [0.166, 0.267], [-0.140, 0.157]]"
+      # TUCKED alternative (arm stowed): the base outline, symmetric about
+      # base_link -- x -0.140..+0.147 (rear chassis to front camera), y
+      # -0.152..+0.157 (outer wheel faces). The tuner swaps to this itself.
+      # Use EITHER footprint OR robot_radius, never both.
+      # footprint: "[[0.147, 0.157], [0.147, -0.152], [-0.140, -0.152], [-0.140, 0.157]]"
+      # No static_layer: the controller collision-checks against what the lidar
+      # sees NOW, not against the map. The mapped planters sit 2-3 cm off the
+      # real ones (AMCL/map error) and that offset ate the margin in the 0.47 m
+      # planter gaps; after each recovery clear the static layer re-painted up
+      # to 109 lethal cells near the robot that no scan supported. The global
+      # costmap keeps the map for planning.
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          # Self-filtered scan (params/scan_self_filter.yaml), so marking needs
+          # no blind zone around the laser.
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          # Marking and clearing both run from the sensor (0.0). Robot-attached
+          # returns are removed upstream by the polygon self-filter instead of by
+          # range, because a planter beside the robot sits at the same 0.16-0.20 m
+          # range as the robot's own returns. History:
+          #  - min ranges 0.30 hid real obstacles within 30 cm, and nothing there
+          #    was ever cleared, so stale marks froze inside the footprint
+          #    (phantom lethal cell at y=-0.126, run 20261005T154800);
+          #  - raytrace 0.0 with marking still at 0.30 then let beams ERASE old
+          #    marks of a close planter that could not be re-marked, and the
+          #    robot's right side ran into it (run 20261005T162105).
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        # Must stay STRICTLY ABOVE the footprint's padded inscribed radius
+        # (0.140 + footprint_padding 0.01 = 0.150). At 0.15 both costmaps log
+        # "configured inflation radius is smaller than the computed inscribed
+        # radius of your footprint" and stop marking the band the robot's body
+        # occupies, so the planner routes into walls ("Starting point in lethal
+        # space!") and the robot collides with a perfectly correct footprint.
+        # The tuner overrides this at runtime, but it governs the first seconds.
+        inflation_radius: 0.20
+      always_send_full_costmap: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      # 0.5 Hz meant the planner's view of obstacles lagged by 2 s, so replans
+      # kept re-proposing paths through space the robot had already discovered
+      # was blocked. Less safety-critical than the local costmap (this one feeds
+      # planning, not collision avoidance) but 2 s is too slow to replan around
+      # anything that is not already in the static map.
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: False
+      # CARRY footprint, same as local_costmap. The global planner must know the
+      # robot's real extent or it will plan paths the extended arm cannot follow.
+      # Same CAD-derived carry polygon as local_costmap above.
+      footprint: "[[-0.140, -0.152], [0.147, -0.152], [0.214, 0.150], [0.222, 0.200], [0.222, 0.243], [0.166, 0.267], [-0.140, 0.157]]"
+      # TUCKED alternative (arm stowed): the base outline, symmetric about
+      # base_link -- x -0.140..+0.147 (rear chassis to front camera), y
+      # -0.152..+0.157 (outer wheel faces). The tuner swaps to this itself.
+      # Use EITHER footprint OR robot_radius, never both.
+      # footprint: "[[0.147, 0.157], [0.147, -0.152], [-0.140, -0.152], [-0.140, 0.157]]"
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          # Self-filtered scan (params/scan_self_filter.yaml), so marking needs
+          # no blind zone around the laser.
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          # See local_costmap note.
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # FIXED, wide, and no longer overridden by the tuner. SmacPlanner2D
+        # plans the robot as a POINT and blocks only cells within the padded
+        # inscribed radius (0.150 m); the inflation radius does not block
+        # anything, it only adds cost that pushes the path away from obstacles.
+        # The robot's corners reach 0.215 m (tucked) / 0.329 m (carry), so with
+        # the tuner's 0.17-0.20 the plan ran the centre 0.17 m from a planter
+        # end and the rectangular body INTO it (run 20261005T154800). Covering
+        # the carry circumscribed radius keeps paths centred in gaps and wide
+        # round planter ends.
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.45
+      always_send_full_costmap: True
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    bt_loop_duration: 100
+    default_server_timeout: 2000
+    wait_for_service_timeout: 5000
+    # 'default_nav_through_poses_bt_xml' and 'default_nav_to_pose_bt_xml' are use defaults:
+    # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
+    # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
+    # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
+    default_nav_to_pose_bt_xml: "/home/forough/phd_projects/mirte_demo/src/mirte_navigation/trees/nav2_minimal_tree.xml"
+    default_nav_through_poses_bt_xml: "/home/forough/phd_projects/mirte_demo/src/mirte_navigation/trees/nav2_minimal_tree.xml"
+
+    navigators: ["navigate_to_pose", "navigate_through_poses"]
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+      enable_groot_monitoring: false
+      groot_server_port: 1667
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+      enable_groot_monitoring: false
+      groot_server_port: 1669
+
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node
+
+bt_navigator_navigate_through_poses_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false
+
+bt_navigator_navigate_to_pose_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false
+
+
+# NOTE: this block is NOT used. The lifecycle manager runs as
+# 'lifecycle_manager_navigation' and takes its parameters INLINE from
+# minimal_navigation_launch.py, so the node name here does not match and
+# nothing below is applied. Edit the launch file instead (that is where
+# bond_timeout lives). Kept only as documentation of the managed set.
+# Recovery behaviours. Previously absent entirely: the behaviour tree called
+# Spin / BackUp / Wait / DriveOnHeading, found no action server, and the goal was
+# aborted the instant the footprint touched a lethal cell -- even with no actual
+# collision and plenty of room to back off and retry.
+#
+# BackUp is the one that matters here: it is what lets the robot reverse out of a
+# cell its footprint should never have been in. simulate_ahead_time makes the
+# behaviours check the costmap before moving, so they are not blind.
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    local_costmap_topic: local_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_costmap_topic: global_costmap/costmap_raw
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_link
+    transform_tolerance: 0.5
+    # Check 2s of motion against the costmap before executing, so a recovery
+    # cannot drive into something the robot can already see.
+    simulate_ahead_time: 2.0
+    # Matched to the base's real capability (measured 0.35 m/s, 1.18 m/s^2);
+    # the nav2 defaults assume a much faster robot and overshoot in this lab.
+    max_rotational_vel: 0.8
+    min_rotational_vel: 0.3
+    rotational_acc_lim: 1.2
+
+lifecycle_manager:
+  ros__parameters:
+    use_sim_time: false
+    autostart: true
+    node_names:
+      - map_server
+      - amcl
+      - planner_server
+      - controller_server
+      - bt_navigator

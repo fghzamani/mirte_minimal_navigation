@@ -15,3 +15,6 @@ __pycache__/
 .vscode/
 .idea/
 *.swp
+
+# Runtime output of speed_logger.py, not source.
+mirte_navigation/speed_log.csv

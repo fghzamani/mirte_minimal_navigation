@@ -7,3 +7,5 @@ slam_toolbox:
     map_update_interval: 5.0
     use_scan_matching: true
     map_topic: /map
+    min_laser_range: 0.2 # added by forough
+    max_laser_range: 12.0 # added by forough

@@ -1,0 +1,25 @@
+# /scan -> /scan_filtered for the costmaps: drops only returns from the robot
+# itself, so the obstacle layers can mark obstacles right up to the body
+# (obstacle_min_range 0.0) instead of being blind inside 0.30 m.
+#
+# Why a polygon and not a range cutoff: a planter beside the robot is 0.16-0.20 m
+# from the laser, the same range as the robot's own returns, so no single
+# min-range separates them. With obstacle_min_range 0.30 the costmap never
+# marked the planter the robot's right side ran into (run 20261005T162105).
+#
+# Polygon in base_link = the CAD base outline (ARM_CONFIGS["tucked"]) plus two
+# small rear-left bumps where robot-attached returns persist across runs while
+# the robot drives (20261005T131516, 140022, 153636, 154800, 162105):
+#   (-0.11..-0.08, +0.15..+0.18)  at / just outside the rear-left wheel
+#   (-0.19..-0.14, +0.04..+0.05)  1-5 cm behind the rear edge (tether cable?)
+# The arm never enters the lidar plane (>= 0.31 m above ground in every pose).
+scan_to_scan_filter_chain:
+  ros__parameters:
+    filter1:
+      name: robot_self
+      type: laser_filters/LaserScanPolygonFilter
+      params:
+        polygon_frame: base_link
+        polygon: "[[0.147, -0.152], [0.147, 0.157], [-0.060, 0.157], [-0.060, 0.190], [-0.125, 0.190], [-0.125, 0.157], [-0.140, 0.157], [-0.140, 0.080], [-0.205, 0.080], [-0.205, 0.020], [-0.140, 0.020], [-0.140, -0.152]]"
+        polygon_padding: 0.0
+        invert: false
